@@ -152,6 +152,8 @@ static void timer1_set_match(uint32_t match);
 static void timer1_clear_match(void);
 static void timer1_wait_fs_lock(void);
 static void timer1_cancel_fs_lock(void);
+static void timer1_wait_buffer(void);
+static void timer1_cancel_buffer(void);
 static void blink(int tx, int rx, int usr);
 static void le_dma_init(void);
 static void le_cc2400_strobe_rx(void);
@@ -350,6 +352,9 @@ void le_DMA_IRQHandler(void) {
 					uint8_t tmp = (uint8_t)DIO_SSP_DR;
 				}
 
+				// XXX disable DMA interrupt as a workaround
+				ICER0 = ICER0_ICE_DMA;
+
 				// TODO error transition on queue_insert
 				queue_insert(&packet_queue, current_rxbuf);
 
@@ -367,6 +372,7 @@ void le_DMA_IRQHandler(void) {
 					else if (conn_event.num_packets == 2) {
 						cc2400_strobe(SRFOFF);
 						current_rxbuf = buffer_get();
+						// TODO handle NULL
 						finish_conn_event();
 						return;
 					}
@@ -375,13 +381,13 @@ void le_DMA_IRQHandler(void) {
 				// get a new packet
 				// TODO handle error transition
 				current_rxbuf = buffer_get();
-
-				// restart DMA and SSP
-				le_dma_init();
-				dio_ssp_start();
-
-				// wait for FS_LOCK in background
-				timer1_wait_fs_lock();
+				if (current_rxbuf == NULL) {
+					// if all buffers are in use, wait for one to free up in background
+					timer1_wait_buffer();
+				} else {
+					// wait for FS_LOCK in background
+					timer1_wait_fs_lock();
+				}
 			}
 		}
 
@@ -563,6 +569,15 @@ static void timer1_cancel_fs_lock(void) {
 	T1MCR &= ~TMCR_MR2I;
 }
 
+static void timer1_wait_buffer(void) {
+	T1MR3 = NOW + USEC(100);
+	T1MCR |= TMCR_MR3I;
+}
+
+static void timer1_cancel_wait_buffer(void) {
+	T1MCR &= ~TMCR_MR3I;
+}
+
 void TIMER1_IRQHandler(void) {
 	// MR0: connection events
 	if (T1IR & TIR_MR0_Interrupt) {
@@ -655,6 +670,11 @@ void TIMER1_IRQHandler(void) {
 
 		// if FS is locked, strobe RX and clear interrupt
 		if (cc2400_status() & FS_LOCK) {
+			// restart DMA and SSP
+			le_dma_init();
+			dio_ssp_start();
+			ISER0 = ISER0_ISE_DMA;
+
 			le_cc2400_strobe_rx();
 			T1MCR &= ~TMCR_MR2I;
 		}
@@ -662,6 +682,27 @@ void TIMER1_IRQHandler(void) {
 		// if FS is not locked, check again in 3 us
 		else {
 			timer1_wait_fs_lock();
+		}
+	}
+
+	// check if an rxbuf is available and transition to FS_LOCK/RX
+	if (T1IR & TIR_MR3_Interrupt) {
+		T1IR = TIR_MR3_Interrupt;
+
+		current_rxbuf = buffer_get();
+		if (current_rxbuf == NULL) {
+			timer1_wait_buffer();
+		} else {
+			if (cc2400_status() & FS_LOCK) {
+				// restart DMA and SSP
+				le_dma_init();
+				dio_ssp_start();
+				ISER0 = ISER0_ISE_DMA;
+
+				le_cc2400_strobe_rx();
+			} else {
+				timer1_wait_fs_lock();
+			}
 		}
 	}
 }

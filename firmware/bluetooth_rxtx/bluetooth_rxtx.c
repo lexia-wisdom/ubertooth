@@ -661,7 +661,7 @@ static int vendor_request_handler(uint8_t request, uint16_t* request_params, uin
 		// Addresses appear in packets in reverse-octet order.
 		// Store the target address in reverse order so that we can do a simple memcmp later
 		if (data[6] > 48) {
-			return 1; // invalid mask
+			return 0; // invalid mask
 		}
 		else if (data[6] == 0) {
 			le.target_set = 0;
@@ -715,6 +715,10 @@ static int vendor_request_handler(uint8_t request, uint16_t* request_params, uin
 #endif
 		requested_mode = MODE_EGO;
 		ego_mode = request_params[0];
+		break;
+
+	case UBERTOOTH_RFCAT_SUBCMD:
+		return rfcat_subcommand(request_params[0], data, *data_len);
 		break;
 
 	default:
@@ -2341,15 +2345,17 @@ void bt_slave_le() {
 
 	clkn_start();
 
+	// enable USB interrupts due to busy waits
+	ISER0 = ISER0_ISE_USB;
+
 	// spam advertising packets
 	while (requested_mode == MODE_BT_SLAVE_LE) {
-		ICER0 = ICER0_ICE_USB;
-		ICER0 = ICER0_ICE_DMA;
 		le_transmit(0x8e89bed6, adv_ind_len+3, adv_ind);
-		ISER0 = ISER0_ISE_USB;
-		ISER0 = ISER0_ISE_DMA;
 		msleep(100);
 	}
+
+	// disable USB interrupts
+	ICER0 = ICER0_ICE_USB;
 }
 
 void rx_generic_sync(void) {
@@ -2567,6 +2573,9 @@ void led_specan()
 
 int main()
 {
+	// enable all fault handlers (see fault.c)
+	SCB_SHCSR = (1 << 18) | (1 << 17) | (1 << 16);
+
 	ubertooth_init();
 	clkn_init();
 	ubertooth_usb_init(vendor_request_handler);
